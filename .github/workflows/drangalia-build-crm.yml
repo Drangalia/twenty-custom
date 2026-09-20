@@ -1,0 +1,79 @@
+name: Build the CRM image
+
+# Builds this fork into ghcr.io/drangalia/twenty so the company box can run its
+# OWN Twenty rather than a published upstream tag.
+#
+# Deliberately manual. A fork tracks upstream, and upstream merges dozens of
+# times a day; building on every sync would burn hours of runner time producing
+# images nobody asked for. You build when you have a reason to — a change of
+# your own, or a deliberate move to a newer upstream.
+#
+# The image is tagged by COMMIT SHA and nothing else moves. infra/internal's
+# compose pins every image for a reason (a floating tag is how a box quietly
+# changes underneath you), so a deploy here is an explicit tag change in that
+# file, reviewed like any other.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to build"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-crm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the ref being built
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Record what is actually being built
+        id: meta
+        run: |
+          echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "upstream=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/twenty-docker/twenty/Dockerfile
+          push: true
+          # No `latest`. The box pins by tag, and a moving tag defeats that.
+          tags: ghcr.io/${{ github.repository_owner }}/twenty:${{ steps.meta.outputs.sha }}
+          # The build is a multi-stage yarn install over a large monorepo; without
+          # a cache every run pays for all of it.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Say how to deploy it
+        run: |
+          echo "### Built \`ghcr.io/${{ github.repository_owner }}/twenty:${{ steps.meta.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source commit dated ${{ steps.meta.outputs.upstream }}." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To run it, change the two \`crm-server\` / \`crm-worker\` image lines in" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`infra/internal/docker-compose.yml\` (Drangalia/Norlo) and open a PR." >> "$GITHUB_STEP_SUMMARY"
+          echo "The package is private to the org; the box needs a read token for ghcr.io." >> "$GITHUB_STEP_SUMMARY"
